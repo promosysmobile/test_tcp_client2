@@ -64,32 +64,26 @@ class _TcpClientPageState extends State<TcpClientPage> {
 
   bool isSending = false;
 
-  @override
-  void dispose() {
-    _stopPeriodicSending();
-    _disconnectFromServer();
-    _hostController.dispose();
-    _portController.dispose();
-    super.dispose();
-  }
 
+  //When Connect button is pressed
   Future<void> _connectToServer() async {
     try {
       final host = _hostController.text;
       final port = int.parse(_portController.text);
 
+      //connect to server
       _socket = await Socket.connect(host, port);
 
       setState(() {
         _isConnected = true;
-        _startPeriodicSending();
+        _startPeriodicSending();    //start the timer to send command
       });
 
       // Listen for incoming data
       _socket!.listen(
             (data) {
           final message = utf8.decode(data);
-          processIncomingMessage(message);
+          processIncomingMessage(message);  //process the reply from server
         },
         onError: (error) {
           setState(() {
@@ -273,6 +267,15 @@ class _TcpClientPageState extends State<TcpClientPage> {
   void _stopPeriodicSending() {
     _periodicTimer?.cancel();
     _periodicTimer = null;
+  }
+
+  @override
+  void dispose() {
+    _stopPeriodicSending();
+    _disconnectFromServer();
+    _hostController.dispose();
+    _portController.dispose();
+    super.dispose();
   }
 
   @override
