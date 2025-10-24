@@ -1,7 +1,14 @@
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
+import 'package:csv/csv.dart';
 import 'package:flutter/material.dart';
+import 'package:fluttertoast/fluttertoast.dart';
+import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
+import 'package:csv/csv.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   runApp(const MyApp());
@@ -31,6 +38,10 @@ class _TcpClientPageState extends State<TcpClientPage> {
   Socket? _socket;
   final TextEditingController _hostController = TextEditingController(text: '22.40.0.69');
   final TextEditingController _portController = TextEditingController(text: '1884');
+
+  final TextEditingController _startIdxController = TextEditingController();
+  final TextEditingController _endIdxController = TextEditingController();
+
   bool _isConnected = false;
   Timer? _periodicTimer;
   int intCommand = 1;
@@ -45,7 +56,8 @@ class _TcpClientPageState extends State<TcpClientPage> {
   static const GVER = 9;
   static const GGSS = 10;
 
-  static const GLOG = 15;
+  static const SDEB = 15;
+  static const GACT = 16;
 
   String strUid = "";
   String strCsq = "";
@@ -61,8 +73,24 @@ class _TcpClientPageState extends State<TcpClientPage> {
 
   int intLogStartIdx = 0;
   int intLogEndIdx = 0;
+  int intLogCurrentIdx = 1;
 
   bool isSending = false;
+  bool isDownloadLog = false;
+
+
+  String strDebugMode = "1";
+
+  // Example data
+  List<List<dynamic>> logsList = [];
+
+  double downloadLogProgress = 0.0;
+
+  @override
+  void initState() {
+    requestStoragePermission();
+    super.initState();
+  }
 
 
   //When Connect button is pressed
@@ -99,6 +127,58 @@ class _TcpClientPageState extends State<TcpClientPage> {
 
     } catch (e) {}
   }
+
+  Future<bool> requestStoragePermission() async {
+    var status = await Permission.manageExternalStorage.request().isGranted;
+    return status;
+  }
+
+  Future<Directory?> getPublicDownloadsDirectory() async {
+    if (Platform.isAndroid) {
+      // For Android
+      final dir = Directory('/storage/emulated/0/Download');
+      if (await dir.exists()) return dir;
+    } else if (Platform.isIOS) {
+      // iOS doesn’t allow public folders, only app directories
+      return await getApplicationDocumentsDirectory();
+    }
+    return null;
+  }
+
+  Future<void> saveCsvToPublicFolder() async {
+    if (!await requestStoragePermission()) {
+      print("Storage permission not granted");
+      return;
+    }
+
+    final downloadsDir = await getPublicDownloadsDirectory();
+    if (downloadsDir == null) {
+      print("Unable to get download directory");
+      return;
+    }
+
+    final filePath = "${downloadsDir.path}/${getSaveLogFileDateTime()}.csv";
+    
+    String csvData = const ListToCsvConverter().convert(logsList);
+    final file = File(filePath);
+
+    await file.writeAsString(csvData);
+    print("CSV saved to: $filePath");
+  }
+
+
+  String getFormattedDateTime() {
+    final now = DateTime.now();
+    final formatter = DateFormat('dd/MM/yyyy HH:mm:ss');
+    return formatter.format(now);
+  }
+
+  String getSaveLogFileDateTime() {
+    final now = DateTime.now();
+    final formatter = DateFormat('TTL_ddMMyyyy_HHmmss');
+    return formatter.format(now);
+  }
+
 
   processIncomingMessage(String message){
     Map<String, dynamic> data = jsonDecode(message);
@@ -186,7 +266,40 @@ class _TcpClientPageState extends State<TcpClientPage> {
           intCommand = GUID;
           break;
 
-        case "GLOG":
+        case "SDEB":
+          var value = data.values.first;
+          if(value == "OK"){
+            if(isDownloadLog){
+              logsList.clear();
+              intCommand = GACT;
+              intLogCurrentIdx = intLogStartIdx;
+            }else{
+              intCommand = GRTC;
+              Fluttertoast.showToast(
+                  msg: "Finish download log",
+                  toastLength: Toast.LENGTH_SHORT,
+                  fontSize: 16.0
+              );
+            }
+          }
+          break;
+
+        case "GACT":
+          var value = data.values.first;
+          if(value.contains("|")){
+            List<String> parts = value.split('|');
+            logsList.add([getFormattedDateTime(), parts[1]]);
+
+            if(parts[0] == intLogEndIdx.toString()){
+              isDownloadLog = false;
+              strDebugMode = "1";
+              intCommand = SDEB;
+              saveCsvToPublicFolder();
+            }else{
+              intLogCurrentIdx += 1;
+              intCommand = GACT;
+            }
+          }
           break;
       }
     });
@@ -235,6 +348,14 @@ class _TcpClientPageState extends State<TcpClientPage> {
       case GGSS:
         sendCommand = {"GGSS":"-"};
         break;
+
+      case SDEB:
+        sendCommand = {"SDEB":strDebugMode};
+        break;
+
+      case GACT:
+        sendCommand = {"GACT":"$intLogCurrentIdx"};
+        break;
     }
     isSending = true;
     _socket!.write('${jsonEncode(sendCommand)}\n');
@@ -253,7 +374,7 @@ class _TcpClientPageState extends State<TcpClientPage> {
   }
 
   void _startPeriodicSending() {
-    _periodicTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+    _periodicTimer = Timer.periodic(const Duration(milliseconds: 200), (timer) {
       if (_socket != null && _isConnected) {
         if(!isSending){
           sendCommand();
@@ -276,6 +397,18 @@ class _TcpClientPageState extends State<TcpClientPage> {
     _hostController.dispose();
     _portController.dispose();
     super.dispose();
+  }
+
+  void startDownloadingLog() async {
+    intLogStartIdx = int.parse(_startIdxController.text);
+    intLogEndIdx = int.parse(_endIdxController.text);
+
+    isSending = true; //temporarily stop the request command
+    isDownloadLog = true;
+    await Future.delayed(Duration(seconds: 1)); //delay
+    strDebugMode = "2";
+    intCommand = SDEB;
+    isSending = false;
   }
 
   @override
@@ -573,6 +706,62 @@ class _TcpClientPageState extends State<TcpClientPage> {
                       ],
                     ),
                   ),
+
+
+                  Text(
+                    "Download Log",
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold
+                    ),
+                  ),
+                  //Download Log
+
+                  isDownloadLog
+                      ? LinearProgressIndicator(value: downloadLogProgress)
+                      : Container(),
+
+                  Padding(
+                    padding: const EdgeInsets.all(10.0),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: TextField(
+                              controller: _startIdxController,
+                              decoration: const InputDecoration(
+                                labelText: 'Start Index',
+                                border: OutlineInputBorder(),
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: Padding(
+                            padding: const EdgeInsets.all(8.0),
+                            child: TextField(
+                              controller: _endIdxController,
+                              decoration: const InputDecoration(
+                                labelText: 'End Index',
+                                border: OutlineInputBorder(),
+                              ),
+                              keyboardType: TextInputType.number,
+                            ),
+                          ),
+                        ),
+
+                        ElevatedButton(
+                          onPressed: (){
+                            startDownloadingLog();
+                          },
+                          child: Text('Download'),
+                        ),
+                      ],
+                    ),
+                  ),
+
 
                 ],
               ),
